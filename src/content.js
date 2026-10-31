@@ -11,6 +11,7 @@
     defaultLunch: 45, // pause prévue quand elle n'est pas encore prise
     fallbackTheoretical: 7 * 60 + 42,
     maxDaily: 10 * 60, // seuil d'alerte
+    plages: [[9 * 60 + 30, 11 * 60 + 30], [13 * 60 + 30, 15 * 60 + 30]], // plages fixes obligatoires
     noLunchUnder: 6 * 60, // pas de pause prévue si le temps restant à faire n'excède pas ce seuil
   };
   const REFETCH_MS = 5 * 60 * 1000;
@@ -108,9 +109,7 @@
     const now = T.nowMinutes();
 
     const theoretical = day.theoretical ?? (day.notWorked ? 0 : s.fallbackTheoretical);
-    const credited = day.credits.reduce((a, c) => a + c.duration, 0);
     const supp = prefs.supp || 0;
-    const required = theoretical + supp - credited;
 
     const punches = day.punches.map((p) => ({ ...p }));
     const last = punches[punches.length - 1];
@@ -132,6 +131,27 @@
       first = badges[0];
       firstSource = 'badgeuse (à vérifier)';
     }
+
+    // Congé : demi-journée = moitié du théorique (3h51), journée = théorique (7h42).
+    // "auto" se base sur les absences de la feuille ; une saisie manuelle les remplace.
+    const ABSENCE = /absence|cong[ée]/i;
+    const sheetAbsence = day.credits.filter((c) => ABSENCE.test(c.label)).reduce((a, c) => a + c.duration, 0);
+    const otherCredits = day.credits.filter((c) => !ABSENCE.test(c.label)).reduce((a, c) => a + c.duration, 0);
+    const half = Math.round(theoretical / 2);
+    // Moitié non travaillée d'une demi-journée : déduite de l'heure d'arrivée (ou de l'heure actuelle)
+    const guessHalf = () => ((first ?? now) < 12 * 60 ? 'pm' : 'am');
+    let leave;
+    let leaveCredit;
+    const leaveAuto = prefs.leave == null;
+    if (!leaveAuto) {
+      leave = prefs.leave === 'half' ? guessHalf() : prefs.leave;
+      leaveCredit = { none: 0, am: half, pm: half, full: theoretical }[leave];
+    } else {
+      leaveCredit = sheetAbsence;
+      leave = sheetAbsence <= 0 ? 'none' : sheetAbsence >= theoretical ? 'full' : guessHalf();
+    }
+    const credited = otherCredits + leaveCredit;
+    const required = theoretical + supp - credited;
 
     // Retour de pause détecté via la badgeuse : badgeage postérieur à la fin du dernier pointage clos
     let returnBadge = null;
@@ -186,12 +206,34 @@
     }
     const otherGaps = gaps.reduce((a, g, i) => (i === lunchGapIdx ? a : a + g.d), 0);
 
-    const result = { theoretical, credited, supp, required, first, firstSource, lunch, lunchState, otherGaps, minLunch, now };
+    // Plages fixes obligatoires, sauf celles couvertes par le congé
+    const plages = (s.plages || [])
+      .filter(([a]) => !(leave === 'full' || (leave === 'am' && a < 12 * 60) || (leave === 'pm' && a >= 12 * 60)))
+      .sort((x, y) => x[0] - y[0]);
+    const applyPlages = (t) => {
+      let plage = null;
+      for (const p of plages) {
+        if (first != null && p[1] > first && t < p[1]) {
+          t = p[1];
+          plage = p;
+        }
+      }
+      return { t, plage };
+    };
+
+    const result = {
+      theoretical, credited, otherCredits, leave, leaveAuto, leaveCredit, supp, required,
+      first, firstSource, lunch, lunchState, otherGaps, minLunch, now, plages,
+    };
     if (required <= 0) return { ...result, covered: true };
     if (first == null) return result;
 
-    result.departure = first + required + lunch + otherGaps;
-    result.baseDeparture = result.departure - supp;
+    result.lateFor = plages.find(([a, b]) => first > a && first < b) || null;
+    result.target = first + required + lunch + otherGaps;
+    const dep = applyPlages(result.target);
+    result.departure = dep.t;
+    result.plage = dep.plage;
+    result.baseDeparture = applyPlages(result.target - supp).t;
     result.remaining = result.departure - now;
     result.progress = Math.min(1, Math.max(0, (now - first) / (result.departure - first)));
     result.overMax = theoretical + supp > s.maxDaily;
@@ -224,6 +266,8 @@
       .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; }
       .row label { color: #374151; }
       .row .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+      input.wide { width: 150px; }
+      select { font: inherit; padding: 2px 4px; border: 1px solid #d1d5db; border-radius: 6px; }
       input[type=time], input[type=number], input.dur { font: inherit; padding: 2px 4px; border: 1px solid #d1d5db; border-radius: 6px; width: 84px; }
       .supp { background: #eff6ff; margin: 0 -12px; padding: 8px 12px; }
       .chips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
@@ -247,7 +291,7 @@
   // Évite de reconstruire le panneau pendant qu'un champ est en cours d'édition
   function editing() {
     const a = shadow.activeElement;
-    return a && a.tagName === 'INPUT';
+    return a && (a.tagName === 'INPUT' || a.tagName === 'SELECT');
   }
 
   function render() {
@@ -273,7 +317,7 @@
     const prefs = dayPrefs();
     let hero;
     if (state.loading) hero = `<div class="hero"><div class="muted">Chargement…</div></div>`;
-    else if (r.covered) hero = `<div class="hero done"><div class="big">✔</div><div class="muted">Temps du jour déjà couvert (télétravail, absence…)</div></div>`;
+    else if (r.covered) hero = `<div class="hero done"><div class="big">✔</div><div class="muted">${r.leave === 'full' ? 'Congé toute la journée' : 'Temps du jour déjà couvert (télétravail, absence…)'}</div></div>`;
     else if (r.departure == null) hero = `<div class="hero"><div class="muted">Aucun badgeage trouvé aujourd'hui.<br>Saisis ton heure d'arrivée ci-dessous.</div></div>`;
     else {
       const late = r.remaining <= 0;
@@ -282,7 +326,9 @@
         <div class="big">${T.fmtClock(r.departure)}</div>
         <div class="muted">${late ? `Objectif atteint depuis ${T.fmtDuration(-r.remaining)}` : `Encore ${T.fmtDuration(r.remaining)}`}
           ${r.supp ? ` · sans supp : ${T.fmtClock(r.baseDeparture)}` : ''}</div>
+        ${r.plage ? `<div class="muted">Heures faites à ${T.fmtClock(r.target)} · plage fixe jusqu'à ${T.fmtClock(r.plage[1])}</div>` : ''}
         <div class="bar"><div style="width:${(r.progress * 100).toFixed(1)}%"></div></div>
+        ${r.lateFor ? `<div class="warn">⚠ Arrivée après le début de la plage fixe ${fmtPlage(r.lateFor)}.</div>` : ''}
         ${r.overMax ? `<div class="warn">⚠ Plus de ${T.fmtDuration(s.maxDaily)} de travail prévues aujourd'hui.</div>` : ''}
       </div>`;
     }
@@ -303,6 +349,10 @@
         ${state.error ? `<div class="err">${escapeHtml(state.error)}</div>` : ''}
         ${hero}
         <div class="rows">
+          <div class="row"><label>Congé</label>
+            <select data-f="leave">${LEAVE_OPTIONS.map(([v, l]) => `<option value="${v}"${(prefs.leave ?? '') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+          ${r.leave !== 'none' ? `<div class="row"><span class="muted">${r.leaveAuto ? 'détecté sur la feuille : ' : ''}${LEAVE_LABELS[r.leave]}</span><span class="v">${T.fmtDuration(r.leaveCredit)}</span></div>` : ''}
+          ${r.covered ? '' : `
           <div class="row"><label>Premier badgeage</label>
             <span class="v">${r.first != null ? T.fmtClock(r.first) : '—'}</span></div>
           <div class="row"><span class="muted">${r.firstSource ? `source : ${r.firstSource}` : ''}</span>
@@ -313,7 +363,8 @@
             <input type="number" min="0" step="5" data-f="plannedLunch" value="${ls.label === 'prévue' ? ls.taken : prefs.plannedLunch ?? s.defaultLunch}"></div>` : ''}
           ${r.otherGaps ? `<div class="row"><label>Autres interruptions</label><span class="v">${T.fmtDuration(r.otherGaps)}</span></div>` : ''}
           <div class="row"><label>Théorique</label><span class="v">${T.fmtDuration(r.theoretical)}</span></div>
-          ${r.credited ? `<div class="row"><label>Déjà crédité</label><span class="v">${T.fmtDuration(r.credited)}</span></div>` : ''}
+          ${r.otherCredits ? `<div class="row"><label>Autres crédits</label><span class="v">${T.fmtDuration(r.otherCredits)}</span></div>` : ''}
+          <div class="row"><label>Plages fixes</label><span class="v">${r.plages.length ? r.plages.map(fmtPlage).join(', ') : 'aucune'}</span></div>`}
           <div class="supp">
             <div class="row"><label><b>Heures supp aujourd'hui</b></label>
               <input type="text" class="dur" data-f="supp" placeholder="0h00" value="${r.supp ? T.fmtDuration(r.supp) : ''}" title="Durée, ex. 0h30 ou 1:15"></div>
@@ -326,6 +377,7 @@
         </div>
         <details>
           <summary>Réglages</summary>
+          <div class="row"><span>Plages fixes</span><input type="text" class="wide" data-s="plages" value="${(s.plages || []).map(fmtPlage).join(', ')}" placeholder="9h30-11h30, 13h30-15h30"></div>
           <div class="row"><span>Pause mini (écrêtage, min)</span><input type="number" min="0" step="5" data-s="minLunch" value="${s.minLunch}"></div>
           <div class="row"><span>Pause prévue par défaut (min)</span><input type="number" min="0" step="5" data-s="defaultLunch" value="${s.defaultLunch}"></div>
           <div class="row"><span>Pas de pause si reste ≤</span><input type="time" data-s="noLunchUnder" value="${T.toInputTime(s.noLunchUnder)}"></div>
@@ -344,6 +396,10 @@
         setDayPref('supp', v || null);
       })
     );
+    frag.querySelector('select[data-f=leave]').addEventListener('change', (e) => {
+      e.target.blur();
+      setDayPref('leave', e.target.value || null);
+    });
     frag.querySelectorAll('input[data-f]').forEach((i) =>
       i.addEventListener('change', () => {
         const f = i.dataset.f;
@@ -357,8 +413,13 @@
     );
     frag.querySelectorAll('input[data-s]').forEach((i) =>
       i.addEventListener('change', () => {
-        const v = i.type === 'time' ? T.fromInputTime(i.value) : parseInt(i.value, 10);
         i.blur();
+        if (i.dataset.s === 'plages') {
+          state.settings = { ...state.settings, plages: parsePlages(i.value) };
+          save();
+          return render();
+        }
+        const v = i.type === 'time' ? T.fromInputTime(i.value) : parseInt(i.value, 10);
         if (v == null || Number.isNaN(v)) return render();
         state.settings = { ...state.settings, [i.dataset.s]: Math.max(0, v) };
         save();
@@ -366,6 +427,19 @@
       })
     );
     wrap.appendChild(frag);
+  }
+
+  const LEAVE_OPTIONS = [['', 'Auto (feuille)'], ['none', 'Aucun'], ['half', 'Demi-journée'], ['am', 'Matin'], ['pm', 'Après-midi'], ['full', 'Journée']];
+  const LEAVE_LABELS = { none: 'aucun', am: 'demi-journée (matin)', pm: 'demi-journée (après-midi)', full: 'journée entière' };
+
+  function fmtPlage([a, b]) {
+    return `${T.fmtClock(a)}–${T.fmtClock(b)}`;
+  }
+
+  function parsePlages(text) {
+    return [...String(text).matchAll(/(\d{1,2})[h:](\d{2})\s*[-–à]\s*(\d{1,2})[h:](\d{2})/g)]
+      .map((m) => [+m[1] * 60 + +m[2], +m[3] * 60 + +m[4]])
+      .filter(([a, b]) => b > a);
   }
 
   function escapeHtml(s) {

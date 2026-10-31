@@ -12,7 +12,6 @@
     fallbackTheoretical: 7 * 60 + 42,
     maxDaily: 10 * 60, // seuil d'alerte
     plages: [[9 * 60 + 30, 11 * 60 + 30], [13 * 60 + 30, 15 * 60 + 30]], // plages fixes obligatoires
-    noLunchUnder: 6 * 60, // pas de pause prévue si le temps restant à faire n'excède pas ce seuil
   };
   const REFETCH_MS = 5 * 60 * 1000;
   const RENDER_MS = 20 * 1000;
@@ -182,8 +181,10 @@
 
     let lunch;
     let lunchState;
-    const minLunch = s.minLunch;
-    const planned = prefs.plannedLunch ?? s.defaultLunch;
+    // Demi-journée de congé : pas de pause méridienne imposée, donc ni pause prévue ni écrêtage
+    const halfLeave = leave === 'am' || leave === 'pm';
+    const minLunch = halfLeave ? 0 : s.minLunch;
+    const planned = prefs.plannedLunch ?? (halfLeave ? 0 : s.defaultLunch);
     const clip = (d) => (d === 0 ? 0 : Math.max(d, minLunch));
     if (day.lunch && day.lunch.duration != null) {
       lunch = Math.max(day.lunch.duration, minLunch);
@@ -191,15 +192,11 @@
     } else if (lunchGapIdx >= 0) {
       lunch = Math.max(gaps[lunchGapIdx].d, minLunch);
       lunchState = { label: 'prise', taken: gaps[lunchGapIdx].d };
-    } else if (last && last.end != null && returnBadge == null && now > last.end && last.end >= 600) {
+    } else if (!halfLeave && last && last.end != null && returnBadge == null && now > last.end && last.end >= 600) {
       // Sortie badgée en fin de matinée, pas encore de retour : pause en cours
       const sofar = now - last.end;
       lunch = clip(Math.max(planned, sofar));
       lunchState = { label: 'en cours', taken: sofar, since: last.end };
-    } else if (prefs.plannedLunch == null && required <= s.noLunchUnder) {
-      // Demi-journée (absence, compensation…) : pas de pause imposée
-      lunch = 0;
-      lunchState = { label: 'prévue', taken: 0 };
     } else {
       lunch = clip(planned);
       lunchState = { label: 'prévue', taken: planned };
@@ -223,7 +220,7 @@
 
     const result = {
       theoretical, credited, otherCredits, leave, leaveAuto, leaveCredit, supp, required,
-      first, firstSource, lunch, lunchState, otherGaps, minLunch, now, plages,
+      first, firstSource, lunch, lunchState, halfLeave, otherGaps, minLunch, now, plages,
     };
     // Week-end, jour férié ou jour non travaillé : pas de théorique sur la feuille
     result.offDay = theoretical === 0 && supp === 0;
@@ -339,7 +336,7 @@
 
     const ls = r.lunchState;
     const lunchTxt = ls.label === 'prévue'
-      ? `prévue ${T.fmtDuration(ls.taken)}`
+      ? (r.halfLeave && !ls.taken ? 'aucune (demi-journée)' : `prévue ${T.fmtDuration(ls.taken)}`)
       : ls.label === 'en cours'
         ? `en cours depuis ${T.fmtClock(ls.since)} (${T.fmtDuration(ls.taken)})`
         : `prise ${T.fmtDuration(ls.taken)}`;
@@ -384,7 +381,6 @@
           <div class="row"><span>Plages fixes</span><input type="text" class="wide" data-s="plages" value="${(s.plages || []).map(fmtPlage).join(', ')}" placeholder="9h30-11h30, 13h30-15h30"></div>
           <div class="row"><span>Pause mini (écrêtage, min)</span><input type="number" min="0" step="5" data-s="minLunch" value="${s.minLunch}"></div>
           <div class="row"><span>Pause prévue par défaut (min)</span><input type="number" min="0" step="5" data-s="defaultLunch" value="${s.defaultLunch}"></div>
-          <div class="row"><span>Pas de pause si reste ≤</span><input type="time" data-s="noLunchUnder" value="${T.toInputTime(s.noLunchUnder)}"></div>
           <div class="row"><span>Théorique par défaut</span><input type="time" data-s="fallbackTheoretical" value="${T.toInputTime(s.fallbackTheoretical)}"></div>
           <div class="row"><span>Alerte au-delà de</span><input type="time" data-s="maxDaily" value="${T.toInputTime(s.maxDaily)}"></div>
         </details>

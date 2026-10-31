@@ -225,6 +225,8 @@
       theoretical, credited, otherCredits, leave, leaveAuto, leaveCredit, supp, required,
       first, firstSource, lunch, lunchState, otherGaps, minLunch, now, plages,
     };
+    // Week-end, jour férié ou jour non travaillé : pas de théorique sur la feuille
+    result.offDay = theoretical === 0 && supp === 0;
     if (required <= 0) return { ...result, covered: true };
     if (first == null) return result;
 
@@ -302,7 +304,8 @@
     if (state.collapsed) {
       let txt = 'Agate Timer';
       let sub = '';
-      if (r.covered) txt = 'Journée couverte';
+      if (r.offDay) txt = 'Jour non travaillé';
+      else if (r.covered) txt = 'Journée couverte';
       else if (r.departure != null) {
         txt = `Départ ${T.fmtClock(r.departure)}`;
         sub = r.remaining > 0 ? `dans ${T.fmtDuration(r.remaining)}` : 'c’est l’heure !';
@@ -317,6 +320,7 @@
     const prefs = dayPrefs();
     let hero;
     if (state.loading) hero = `<div class="hero"><div class="muted">Chargement…</div></div>`;
+    else if (r.offDay) hero = `<div class="hero"><div class="big">—</div><div class="muted">Pas de temps à faire aujourd'hui<br>(week-end, jour férié ou jour non travaillé sur la feuille)</div></div>`;
     else if (r.covered) hero = `<div class="hero done"><div class="big">✔</div><div class="muted">${r.leave === 'full' ? 'Congé toute la journée' : 'Temps du jour déjà couvert (télétravail, absence…)'}</div></div>`;
     else if (r.departure == null) hero = `<div class="hero"><div class="muted">Aucun badgeage trouvé aujourd'hui.<br>Saisis ton heure d'arrivée ci-dessous.</div></div>`;
     else {

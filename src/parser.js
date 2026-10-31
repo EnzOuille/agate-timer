@@ -58,21 +58,19 @@
     return day;
   }
 
-  // Modale "Contrôle des pointages" : on récupère toutes les heures présentes dans les cellules du tableau.
-  // Structure HTML non documentée -> extraction volontairement tolérante.
+  // Modale "Contrôle des pointages" (/time/punch/{id}/{date}) : un formulaire dont chaque ligne porte
+  // l'heure dans <input type="time" name="punch_manage[punches][n][time]" value="07:06">.
+  // Les badgeages cochés « Supprimer » sont ignorés.
   function parsePunchModal(doc) {
-    const times = new Set();
-    const cells = doc.querySelectorAll('td, li, .badge');
-    const scope = cells.length ? cells : [doc.body];
-    for (const el of scope) {
-      if (el.children.length > 3) continue;
-      for (const m of el.textContent.matchAll(/\b(\d{1,2})[h:](\d{2})\b/g)) {
-        const h = +m[1];
-        const mn = +m[2];
-        if (h < 24 && mn < 60) times.add(h * 60 + mn);
-      }
+    const times = [];
+    for (const input of doc.querySelectorAll('input[type="time"][name$="[time]"]')) {
+      const row = input.closest('tr');
+      const canceled = row && row.querySelector('input[type="checkbox"][name$="[canceled]"]');
+      if (canceled && (canceled.checked || canceled.hasAttribute('checked'))) continue;
+      const m = /^(\d{1,2}):(\d{2})/.exec(input.getAttribute('value') || '');
+      if (m) times.push(+m[1] * 60 + +m[2]);
     }
-    return [...times].sort((a, b) => a - b);
+    return times.sort((a, b) => a - b);
   }
 
   root.AgateParser = { findUserId, findLocale, parseDay, parsePunchModal };

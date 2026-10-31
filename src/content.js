@@ -1,6 +1,8 @@
 (function () {
   'use strict';
   if (window.top !== window || window.__agateTimer) return;
+  // Fragments HTML (contenu de modale ouvert directement) : pas de panneau
+  if (!document.querySelector('.navbar-custom, .wrapper')) return;
   window.__agateTimer = true;
 
   const T = window.AgateTime;
@@ -110,13 +112,20 @@
     const theoretical = day.theoretical ?? (day.notWorked ? 0 : s.fallbackTheoretical);
     const supp = prefs.supp || 0;
 
-    const punches = day.punches.map((p) => ({ ...p }));
+    // Badgeages bruts (entrée, sortie, entrée…) : à jour en temps réel, contrairement à la feuille
+    // qui n'affiche un pointage qu'une fois clos. On les privilégie quand ils sont disponibles.
+    const badges = state.modalTimes.filter((t) => t <= now + 1);
+    let punches;
+    let punchSource;
+    if (badges.length) {
+      punches = [];
+      for (let i = 0; i < badges.length; i += 2) punches.push({ start: badges[i], end: badges[i + 1] ?? null });
+      punchSource = 'badgeuse';
+    } else {
+      punches = day.punches.map((p) => ({ ...p }));
+      punchSource = 'feuille de temps';
+    }
     const last = punches[punches.length - 1];
-
-    // Heures de badgeage brutes (modale) : sert à détecter un badgeage en cours non encore reporté sur la feuille.
-    // On écarte les valeurs qui ressemblent à des durées de la journée.
-    const durations = new Set([theoretical, ...day.credits.map((c) => c.duration)]);
-    const badges = state.modalTimes.filter((t) => t <= now + 1 && !durations.has(t));
 
     let first = null;
     let firstSource = null;
@@ -125,10 +134,7 @@
       firstSource = 'manuel';
     } else if (punches.length) {
       first = punches[0].start;
-      firstSource = 'feuille de temps';
-    } else if (badges.length) {
-      first = badges[0];
-      firstSource = 'badgeuse (à vérifier)';
+      firstSource = punchSource;
     }
 
     // Congé : demi-journée = moitié du théorique (3h51), journée = théorique (7h42).
@@ -151,13 +157,6 @@
     }
     const credited = otherCredits + leaveCredit;
     const required = theoretical + supp - credited;
-
-    // Retour de pause détecté via la badgeuse : badgeage postérieur à la fin du dernier pointage clos
-    let returnBadge = null;
-    if (last && last.end != null) {
-      returnBadge = badges.find((t) => t > last.end) ?? null;
-      if (returnBadge != null) punches.push({ start: returnBadge, end: null });
-    }
 
     // Écarts entre pointages consécutifs
     const gaps = [];
@@ -192,7 +191,7 @@
     } else if (lunchGapIdx >= 0) {
       lunch = Math.max(gaps[lunchGapIdx].d, minLunch);
       lunchState = { label: 'prise', taken: gaps[lunchGapIdx].d };
-    } else if (!halfLeave && last && last.end != null && returnBadge == null && now > last.end && last.end >= 600) {
+    } else if (!halfLeave && last && last.end != null && now > last.end && last.end >= 600) {
       // Sortie badgée en fin de matinée, pas encore de retour : pause en cours
       const sofar = now - last.end;
       lunch = clip(Math.max(planned, sofar));

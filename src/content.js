@@ -81,8 +81,10 @@
 
   // ---------- Récupération des données ----------
 
-  async function fetchDoc(url) {
-    const res = await fetch(url, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+  // xhr : uniquement pour les fragments qu'oHRis charge lui-même en AJAX (modale des pointages).
+  // Sur une page complète, l'en-tête peut faire répondre le serveur autrement (ex. données JSON d'un tableau).
+  async function fetchDoc(url, { xhr = false } = {}) {
+    const res = await fetch(url, { credentials: 'same-origin', headers: xhr ? { 'X-Requested-With': 'XMLHttpRequest' } : {} });
     if (!res.ok) throw new Error(`HTTP ${res.status} sur ${url}`);
     return new DOMParser().parseFromString(await res.text(), 'text/html');
   }
@@ -91,8 +93,8 @@
     const key = today();
     // Une même page peut servir au jour et au mois pendant un cycle de rafraîchissement
     const docs = new Map();
-    const getDoc = (url) => {
-      if (!docs.has(url)) docs.set(url, fetchDoc(url));
+    const getDoc = (url, opts) => {
+      if (!docs.has(url)) docs.set(url, fetchDoc(url, opts));
       return docs.get(url);
     };
     const uid = P.findUserId(document);
@@ -112,7 +114,7 @@
       state.modalTimes = [];
       if (uid) {
         try {
-          state.modalTimes = P.parsePunchModal(await getDoc(`/${locale}/time/punch/${uid}/${key}`));
+          state.modalTimes = P.parsePunchModal(await getDoc(`/${locale}/time/punch/${uid}/${key}`, { xhr: true }));
         } catch (e) {
           console.debug('[Agate Timer] modale des pointages indisponible', e);
         }
@@ -156,8 +158,9 @@
 
       try {
         state.recup = P.parseRecupBalance(await getDoc(`/${locale}/absence/${uid}`));
+        state.recupError = state.recup == null ? 'compteur « Récupération Horaire » introuvable' : null;
       } catch (e) {
-        console.debug('[Agate Timer] compteurs indisponibles', e);
+        state.recupError = e.message;
       }
       state.monthError = null;
       state.monthFetchedAt = Date.now();
@@ -574,6 +577,7 @@
         ${mv.missing.length ? `<div class="warn">⚠ ${mv.missing.length} jour(s) introuvable(s) dans les feuilles.</div>` : ''}
         <div class="section">Compteur</div>
         <div class="row"><label>Solde récupération horaire</label><span class="v">${state.recup != null ? T.fmtDuration(state.recup) : '—'}</span></div>
+        ${state.recupError ? `<div class="warn">⚠ ${escapeHtml(state.recupError)}</div>` : ''}
       </div>
       <details open>
         <summary>Historique des différentiels mensuels</summary>

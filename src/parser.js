@@ -1,6 +1,6 @@
 // Extraction des données de la feuille de temps oHRis.
 (function (root) {
-  const { parseDuration, parseRange } = root.AgateTime;
+  const { parseDuration, parseRange, parseHM } = root.AgateTime;
 
   const LUNCH = /pause du midi/i;
   const CLIPPING = /cr[eê]tage/i; // "Ecrêtage de la pause du midi" : conséquence de la pause, déjà modélisée
@@ -73,5 +73,46 @@
     return times.sort((a, b) => a - b);
   }
 
-  root.AgateParser = { findUserId, findLocale, parseDay, parsePunchModal };
+  // Toutes les lignes jour de la feuille : théorique et effectif (colonne « Effectif », écrêtage inclus)
+  function parseSheetDays(doc) {
+    const days = {};
+    for (const row of doc.querySelectorAll('tr[id^="td-"]')) {
+      const key = row.id.slice(3);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) continue;
+      const theoEl = row.querySelector('.theoricalColumn');
+      const effEl = [...row.children].find((td) => td.classList.contains('text-end') && !td.classList.contains('d-none'));
+      days[key] = {
+        theo: theoEl ? parseDuration(theoEl.textContent) : null,
+        eff: effEl ? parseDuration(effEl.textContent) : null,
+      };
+    }
+    return days;
+  }
+
+  // Récapitulatif mensuel de la feuille, présent une fois la dernière semaine du mois écoulée
+  function parseMonthRecap(doc) {
+    const recap = { diff: null, worked: null, recup: null };
+    for (const td of doc.querySelectorAll('tr.summaryTr td[title]')) {
+      const title = td.getAttribute('title');
+      const valueEl = td.parentElement.querySelector('td[colspan="4"]');
+      const v = valueEl ? parseDuration(valueEl.textContent) : null;
+      if (v == null) continue;
+      if (/diff[ée]rentiel mensuel/i.test(title)) recap.diff = v;
+      else if (/total d.heures/i.test(title)) recap.worked = v;
+      else if (/r[ée]cup[ée]rations g[ée]n[ée]r[ée]es/i.test(title)) recap.recup = v;
+    }
+    return recap;
+  }
+
+  // Page Absences > Compteur(s) : solde du compteur « Récupération Horaire »
+  function parseRecupBalance(doc) {
+    for (const row of doc.querySelectorAll('#userAbsenceMeters tbody tr')) {
+      const cells = row.querySelectorAll(':scope > td');
+      if (cells.length < 6 || !/r[ée]cup[ée]ration horaire/i.test(cells[0].textContent)) continue;
+      return parseHM(cells[5].textContent);
+    }
+    return null;
+  }
+
+  root.AgateParser = { findUserId, findLocale, parseDay, parsePunchModal, parseSheetDays, parseMonthRecap, parseRecupBalance };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -54,5 +54,32 @@
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
-  root.AgateTime = { parseDuration, parseRange, fmtClock, fmtDuration, toInputTime, fromInputTime, nowMinutes, todayKey };
+  // "3h 32m", "-1h 05m", "0h" (compteurs d'absences) -> minutes
+  function parseHM(text) {
+    const m = String(text || '').replace(/\s+/g, '').match(/^(-)?(\d+)h(?:(\d+)m?)?$/);
+    if (!m) return null;
+    const v = +m[2] * 60 + (m[3] ? +m[3] : 0);
+    return m[1] ? -v : v;
+  }
+
+  // Dates manipulées sous forme de clés "YYYY-MM-DD" (heure locale)
+  function fromKey(key) {
+    const [y, m, d] = key.split('-').map(Number);
+    return new Date(y, m - 1, d);
+  }
+  function addDays(key, n) {
+    const d = fromKey(key);
+    d.setDate(d.getDate() + n);
+    return todayKey(d);
+  }
+  // Dimanche de la semaine (lundi → dimanche) contenant la date
+  function sundayOf(key) {
+    const dow = fromKey(key).getDay();
+    return addDays(key, dow === 0 ? 0 : 7 - dow);
+  }
+
+  root.AgateTime = {
+    parseDuration, parseRange, parseHM, fmtClock, fmtDuration, toInputTime, fromInputTime, nowMinutes, todayKey,
+    fromKey, addDays, sundayOf,
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

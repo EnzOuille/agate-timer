@@ -3,7 +3,9 @@
   "name": "Agate Timer",
   "version": "1.0.0",
   "description": "Affiche l'heure de départ sur agate-tempo.cnrs.fr à partir du premier badgeage, de la pause méridienne et des heures supplémentaires du jour.",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -11,8 +13,15 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://agate-tempo.cnrs.fr/*"],
-      "js": ["src/time.js", "src/parser.js", "src/content.js"],
+      "matches": [
+        "https://agate-tempo.cnrs.fr/*"
+      ],
+      "js": [
+        "src/time.js",
+        "src/parser.js",
+        "src/month.js",
+        "src/content.js"
+      ],
       "run_at": "document_idle"
     }
   ]

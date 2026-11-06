@@ -7,6 +7,7 @@
 
   const T = window.AgateTime;
   const P = window.AgateParser;
+  const M = window.AgateMonth;
 
   const DEFAULT_SETTINGS = {
     minLunch: 45, // en dessous, oHRis écrête la pause du midi
@@ -18,6 +19,11 @@
   const REFETCH_MS = 5 * 60 * 1000;
   const RENDER_MS = 20 * 1000;
   const KEEP_DAYS = 14;
+  const MONTH_REFETCH_MS = 30 * 60 * 1000;
+  const HISTORY_MONTHS = 6;
+  // Mois précédent : relu toutes les heures (validations tardives) ; plus anciens : une fois par jour
+  const HISTORY_TTL_PREV = 60 * 60 * 1000;
+  const HISTORY_TTL = 24 * 60 * 60 * 1000;
 
   const state = {
     settings: { ...DEFAULT_SETTINGS },
@@ -27,6 +33,12 @@
     modalTimes: [],
     error: null,
     loading: true,
+    tab: 'day',
+    month: null, // { y, m, period, days }
+    history: {}, // { "YYYY-MM": { diff, worked, recup, at } }
+    recup: null,
+    monthError: null,
+    monthFetchedAt: 0,
   };
 
   const today = () => T.todayKey();
@@ -35,7 +47,9 @@
   // ---------- Stockage ----------
 
   async function load() {
-    const s = await chrome.storage.local.get(['settings', 'days', 'collapsed']);
+    const s = await chrome.storage.local.get(['settings', 'days', 'collapsed', 'tab', 'history']);
+    state.tab = s.tab === 'month' ? 'month' : 'day';
+    state.history = s.history || {};
     state.settings = { ...DEFAULT_SETTINGS, ...(s.settings || {}) };
     state.days = s.days || {};
     state.collapsed = !!s.collapsed;
@@ -44,7 +58,9 @@
   }
 
   function save() {
-    return chrome.storage.local.set({ settings: state.settings, days: state.days, collapsed: state.collapsed });
+    return chrome.storage.local.set({
+      settings: state.settings, days: state.days, collapsed: state.collapsed, tab: state.tab, history: state.history,
+    });
   }
 
   function setDayPref(key, value) {
@@ -71,16 +87,23 @@
     return new DOMParser().parseFromString(await res.text(), 'text/html');
   }
 
-  async function refresh() {
+  async function refresh(force = false) {
     const key = today();
+    // Une même page peut servir au jour et au mois pendant un cycle de rafraîchissement
+    const docs = new Map();
+    const getDoc = (url) => {
+      if (!docs.has(url)) docs.set(url, fetchDoc(url));
+      return docs.get(url);
+    };
+    const uid = P.findUserId(document);
+    const locale = P.findLocale(location);
+    const sheetUrl = ({ y, m }) => `/${locale}/time/sheet/${uid}/month/${y}/${m}`;
     try {
       let day = P.parseDay(document, key);
-      const uid = P.findUserId(document);
-      const locale = P.findLocale(location);
       if (!day) {
         if (!uid) throw new Error("Identifiant utilisateur introuvable sur cette page.");
-        const [y, m] = key.split('-');
-        day = P.parseDay(await fetchDoc(`/${locale}/time/sheet/${uid}/month/${y}/${+m}`), key);
+        const [y, m] = key.split('-').map(Number);
+        day = P.parseDay(await getDoc(sheetUrl({ y, m })), key);
         if (!day) throw new Error("Ligne du jour introuvable dans la feuille de temps.");
       }
       state.day = day;
@@ -89,7 +112,7 @@
       state.modalTimes = [];
       if (uid) {
         try {
-          state.modalTimes = P.parsePunchModal(await fetchDoc(`/${locale}/time/punch/${uid}/${key}`));
+          state.modalTimes = P.parsePunchModal(await getDoc(`/${locale}/time/punch/${uid}/${key}`));
         } catch (e) {
           console.debug('[Agate Timer] modale des pointages indisponible', e);
         }
@@ -99,6 +122,49 @@
     }
     state.loading = false;
     render();
+
+    if (uid && (force || Date.now() - state.monthFetchedAt > MONTH_REFETCH_MS)) {
+      await refreshMonth(uid, locale, getDoc, sheetUrl);
+      render();
+    }
+  }
+
+  async function refreshMonth(uid, locale, getDoc, sheetUrl) {
+    try {
+      const cur = M.attributedMonth(today());
+      const period = M.period(cur);
+      // La première semaine peut commencer le mois précédent
+      const [sy, sm] = period.start.split('-').map(Number);
+      const months = sy === cur.y && sm === cur.m ? [cur] : [{ y: sy, m: sm }, cur];
+      const days = {};
+      for (const mo of months) Object.assign(days, P.parseSheetDays(await getDoc(sheetUrl(mo))));
+      state.month = { ...cur, period, days };
+
+      for (let k = 1; k <= HISTORY_MONTHS; k++) {
+        const mo = M.shiftMonth(cur, -k);
+        const hk = M.ym(mo.y, mo.m);
+        const cached = state.history[hk];
+        if (cached && Date.now() - cached.at < (k === 1 ? HISTORY_TTL_PREV : HISTORY_TTL)) continue;
+        try {
+          state.history[hk] = { ...P.parseMonthRecap(await getDoc(sheetUrl(mo))), at: Date.now() };
+        } catch (e) {
+          console.debug('[Agate Timer] feuille indisponible', hk, e);
+        }
+      }
+      const oldest = M.shiftMonth(cur, -HISTORY_MONTHS);
+      for (const hk of Object.keys(state.history)) if (hk < M.ym(oldest.y, oldest.m)) delete state.history[hk];
+
+      try {
+        state.recup = P.parseRecupBalance(await getDoc(`/${locale}/absence/${uid}`));
+      } catch (e) {
+        console.debug('[Agate Timer] compteurs indisponibles', e);
+      }
+      state.monthError = null;
+      state.monthFetchedAt = Date.now();
+      save();
+    } catch (e) {
+      state.monthError = e.message;
+    }
   }
 
   // ---------- Calcul ----------
@@ -238,6 +304,45 @@
     return result;
   }
 
+  // Vue mensuelle : différentiel à date, reste à faire sur tout le mois, alerte et historique
+  function monthView(r) {
+    if (!state.month) return null;
+    const mo = state.month;
+    // Journée en cours : si un départ est calculé, on suppose un départ à l'heure prévue (différentiel = supp)
+    const c = M.compute({
+      days: mo.days, period: mo.period, todayKey: today(), todayProjection: r.departure != null ? r.supp : null,
+    });
+    const prevMo = M.shiftMonth(mo, -1);
+    const prev = state.history[M.ym(prevMo.y, prevMo.m)];
+    const name = M.monthName(mo);
+    let alert = null;
+    // Règle : le différentiel mensuel ne peut pas être négatif deux mois d'affilée
+    if (prev && prev.diff != null && prev.diff < 0) {
+      alert = c.withToday < 0
+        ? { level: 'danger', text: `${M.monthName(prevMo)} a fini en négatif (${fmtSigned(prev.diff)}) : ${name} ne doit pas l'être. Il te manque ${T.fmtDuration(-c.withToday)}.` }
+        : { level: 'warn', text: `${M.monthName(prevMo)} a fini en négatif (${fmtSigned(prev.diff)}) : ${name} doit rester positif.` };
+    } else if (c.withToday < 0) {
+      alert = { level: 'info', text: `Si ${name} finit en négatif, ${M.monthName(M.shiftMonth(mo, 1))} ne pourra pas l'être.` };
+    }
+    const history = [];
+    for (let k = 1; k <= HISTORY_MONTHS; k++) {
+      const hm = M.shiftMonth(mo, -k);
+      const pm = M.shiftMonth(hm, -1);
+      const h = state.history[M.ym(hm.y, hm.m)];
+      const hp = state.history[M.ym(pm.y, pm.m)];
+      history.push({ name: M.monthName(hm), diff: h?.diff ?? null, recup: h?.recup ?? null, twice: h?.diff < 0 && hp?.diff < 0 });
+    }
+    return { ...c, name, period: mo.period, alert, history };
+  }
+
+  function fmtSigned(v) {
+    return T.fmtDuration(v, { sign: true });
+  }
+
+  function fmtDate(key) {
+    return T.fromKey(key).toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' });
+  }
+
   // ---------- Interface ----------
 
   const host = document.createElement('div');
@@ -272,6 +377,16 @@
       .chips button, .link { font: inherit; font-size: 12px; border: 1px solid #93c5fd; background: #fff; color: #1e40af; border-radius: 999px; padding: 1px 8px; cursor: pointer; }
       .link { border: 0; padding: 0; background: none; text-decoration: underline; }
       details { border-top: 1px solid #e5e7eb; padding: 6px 12px 10px; }
+      .tabs { display: flex; gap: 4px; }
+      .head .tabs button { font: inherit; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: rgba(255,255,255,.15); }
+      .head .tabs button.on { background: #fff; color: #1e3a8a; }
+      .pos { color: #16a34a !important; }
+      .neg { color: #b91c1c !important; }
+      .alert { margin: 8px 12px 0; padding: 6px 8px; border-radius: 8px; font-size: 12px; border: 1px solid; }
+      .alert.danger { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+      .alert.warn { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+      .alert.info { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+      .section { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin-top: 6px; }
       summary { cursor: pointer; color: #4b5563; font-size: 12px; }
     </style>
     <div class="wrap"></div>`;
@@ -306,6 +421,7 @@
         txt = `Départ ${T.fmtClock(r.departure)}`;
         sub = r.remaining > 0 ? `dans ${T.fmtDuration(r.remaining)}` : 'c’est l’heure !';
       } else if (!state.loading) sub = 'pas de badgeage';
+      if (monthView(r)?.alert?.level === 'danger') txt = `⚠ ${txt}`;
       const pill = el(`<button class="pill" title="Agate Timer"><span>${txt}</span><span class="sub">${sub}</span></button>`);
       pill.firstElementChild.addEventListener('click', () => { state.collapsed = false; save(); render(); });
       wrap.appendChild(pill);
@@ -333,6 +449,7 @@
       </div>`;
     }
 
+    const mv = monthView(r);
     const ls = r.lunchState;
     const lunchTxt = ls.label === 'prévue'
       ? (r.halfLeave && !ls.taken ? 'aucune (demi-journée)' : `prévue ${T.fmtDuration(ls.taken)}`)
@@ -343,10 +460,12 @@
 
     const frag = el(`
       <div class="panel">
-        <div class="head"><span>Agate Timer</span>
+        <div class="head">
+          <span class="tabs"><button data-tab="day" class="${state.tab === 'day' ? 'on' : ''}">Jour</button><button data-tab="month" class="${state.tab === 'month' ? 'on' : ''}">Mois${mv?.alert?.level === 'danger' ? ' ⚠' : ''}</button></span>
           <span><button data-a="refresh" title="Actualiser">⟳</button> <button data-a="collapse" title="Réduire">–</button></span>
         </div>
         ${state.error ? `<div class="err">${escapeHtml(state.error)}</div>` : ''}
+        ${state.tab === 'month' ? monthHtml(mv) : `
         ${hero}
         <div class="rows">
           <div class="row"><label>Congé</label>
@@ -382,11 +501,14 @@
           <div class="row"><span>Pause prévue par défaut (min)</span><input type="number" min="0" step="5" data-s="defaultLunch" value="${s.defaultLunch}"></div>
           <div class="row"><span>Théorique par défaut</span><input type="time" data-s="fallbackTheoretical" value="${T.toInputTime(s.fallbackTheoretical)}"></div>
           <div class="row"><span>Alerte au-delà de</span><input type="time" data-s="maxDaily" value="${T.toInputTime(s.maxDaily)}"></div>
-        </details>
+        </details>`}
       </div>`);
 
     frag.querySelector('[data-a=collapse]').addEventListener('click', () => { state.collapsed = true; save(); render(); });
-    frag.querySelector('[data-a=refresh]').addEventListener('click', () => { state.loading = true; render(); refresh(); });
+    frag.querySelector('[data-a=refresh]').addEventListener('click', () => { state.loading = true; render(); refresh(true); });
+    frag.querySelectorAll('[data-tab]').forEach((b) =>
+      b.addEventListener('click', () => { state.tab = b.dataset.tab; save(); render(); })
+    );
     frag.querySelector('[data-a=clearFirst]')?.addEventListener('click', () => setDayPref('firstOverride', null));
     frag.querySelector('[data-a=clearSupp]')?.addEventListener('click', () => setDayPref('supp', null));
     frag.querySelectorAll('[data-supp]').forEach((b) =>
@@ -395,7 +517,7 @@
         setDayPref('supp', v || null);
       })
     );
-    frag.querySelector('select[data-f=leave]').addEventListener('change', (e) => {
+    frag.querySelector('select[data-f=leave]')?.addEventListener('change', (e) => {
       e.target.blur();
       setDayPref('leave', e.target.value || null);
     });
@@ -426,6 +548,39 @@
       })
     );
     wrap.appendChild(frag);
+  }
+
+  function monthHtml(mv) {
+    if (!mv) {
+      return `<div class="hero"><div class="muted">${state.monthError ? '' : 'Chargement du mois…'}</div></div>
+        ${state.monthError ? `<div class="err">${escapeHtml(state.monthError)}</div>` : ''}`;
+    }
+    const cls = (v) => (v < 0 ? 'neg' : 'pos');
+    const covered = mv.remaining <= 0;
+    return `
+      <div class="hero">
+        <div class="muted">${mv.name} · ${fmtDate(mv.period.start)} → ${fmtDate(mv.period.end)}</div>
+        <div class="big ${cls(mv.pastDiff)}">${fmtSigned(mv.pastDiff)}</div>
+        <div class="muted">Différentiel à date (jours écoulés, hors aujourd'hui)</div>
+      </div>
+      ${mv.alert ? `<div class="alert ${mv.alert.level}">${mv.alert.level === 'info' ? 'ℹ' : '⚠'} ${escapeHtml(mv.alert.text)}</div>` : ''}
+      <div class="rows">
+        <div class="row"><label>Avec aujourd'hui</label><span class="v ${cls(mv.withToday)}">${fmtSigned(mv.withToday)}</span></div>
+        <div class="muted">en partant à l'heure prévue ce soir</div>
+        <div class="section">Sur tout le mois</div>
+        <div class="row"><label>${covered ? 'Avance sur le mois' : 'Reste à faire'}</label>
+          <span class="v ${covered ? 'pos' : ''}">${T.fmtDuration(Math.abs(mv.remaining))}</span></div>
+        <div class="muted">théorique ${T.fmtDuration(mv.allTheo)} · déjà acquis ${T.fmtDuration(mv.allEff)}${!covered && mv.workdaysLeft ? ` · ${mv.workdaysLeft} jour${mv.workdaysLeft > 1 ? 's' : ''} restant${mv.workdaysLeft > 1 ? 's' : ''} (≈ ${T.fmtDuration(mv.perDay)}/jour)` : ''}</div>
+        ${mv.missing.length ? `<div class="warn">⚠ ${mv.missing.length} jour(s) introuvable(s) dans les feuilles.</div>` : ''}
+        <div class="section">Compteur</div>
+        <div class="row"><label>Solde récupération horaire</label><span class="v">${state.recup != null ? T.fmtDuration(state.recup) : '—'}</span></div>
+      </div>
+      <details open>
+        <summary>Historique des différentiels mensuels</summary>
+        ${mv.history.map((h) => `<div class="row"><span>${h.name}${h.twice ? ' <span class="neg">⚠ 2e mois négatif</span>' : ''}</span>
+          <span class="v ${h.diff == null ? '' : cls(h.diff)}" title="${h.recup != null ? `Récupérations générées : ${T.fmtDuration(h.recup)}` : ''}">${h.diff == null ? '—' : fmtSigned(h.diff)}</span></div>`).join('')}
+        <div class="muted">Survoler une valeur pour voir les récupérations générées.</div>
+      </details>`;
   }
 
   const LEAVE_OPTIONS = [['', 'Auto (feuille)'], ['none', 'Aucun'], ['half', 'Demi-journée'], ['am', 'Matin'], ['pm', 'Après-midi'], ['full', 'Journée']];

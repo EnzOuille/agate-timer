@@ -27,6 +27,18 @@ départ        = max(heures faites, fin de chaque plage fixe non couverte par un
 - **Pause du midi** : entrée « Pause du midi » si présente, sinon écart entre deux pointages chevauchant 11h–14h30, sinon pause en cours (sortie badgée, pas encore de retour), sinon pause prévue (45 min par défaut, modifiable pour la journée). Une pause plus courte que 45 min est comptée 45 min, comme l'écrêtage oHRis. Avec une demi-journée de congé, aucune pause méridienne n'est imposée : ni pause prévue, ni écrêtage (une pause réellement prise est comptée pour sa durée).
 - **Heures supp** : saisies pour la journée en cours (`1h30`, `1:30`, `30` = 30 min, ou boutons). Stockées localement, purgées après 14 jours.
 
+## Onglet Mois
+
+Une semaine (lundi → dimanche) compte pour le mois qui contient son **dimanche**, comme le « Différentiel mensuel » de la feuille oHRis (ex. novembre 2026 = du lundi 26/10 au dimanche 29/11).
+
+- **Différentiel à date** : somme de « Effectif − Théorique » sur les jours écoulés de la période, hors aujourd'hui. **Avec aujourd'hui** ajoute la journée en cours en supposant un départ à l'heure prévue (différentiel = heures supp saisies).
+- **Sur tout le mois** : théorique de tous les jours de la période − effectif déjà acquis (y compris télétravail ou congés futurs déjà posés) = reste à faire, avec le nombre de jours restants et la moyenne par jour.
+- **Solde récupération horaire** : lu dans Absences > Compteur(s).
+- **Historique** : « Différentiel mensuel » des 6 mois précédents, lu dans le récapitulatif de chaque feuille (mis en cache : 1h pour le mois précédent, 24h pour les autres).
+- **Alerte** : le différentiel mensuel ne peut pas être négatif deux mois d'affilée. Si le mois précédent est négatif et que le mois en cours l'est aussi, alerte rouge (⚠ aussi sur l'onglet et la pastille) avec le temps manquant.
+
+Les données du mois sont relues toutes les 30 minutes ou via ⟳.
+
 Les données de la feuille sont relues toutes les 5 minutes et au retour sur l'onglet. Rien ne sort du navigateur : l'extension ne fait que des requêtes same-origin vers oHRis avec ta session.
 
 ## Limites
